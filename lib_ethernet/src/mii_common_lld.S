@@ -28,7 +28,7 @@ mii_per_core_error_and_dv:
         .globl  mii_setup_error_port
         .align  4
         .type   mii_setup_error_port,@function
-#if defined(__XS2A__)
+#if defined(__XS2A__) || defined(__XS3A__)
         .issue_mode single
 #endif
 mii_setup_error_port:

@@ -129,6 +129,7 @@ void smi(server interface smi_if i,
       smi_bit_shift(p_smi_mdc, p_smi_mdio, 2, 2, inning,
                     0, 0);
       (void) smi_bit_shift(p_smi_mdc, p_smi_mdio, val, 16, inning, 0, 0);
+      p_smi_mdio :> void; // Set MDIO Idle (High-z)
       break;
     }
   }

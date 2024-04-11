@@ -10,71 +10,61 @@
 #include "rgmii_consts.h"
 #include "debug_print.h"
 
-void enable_rgmii(unsigned delay, unsigned divide) {
-#if defined(__XS2A__)
-  unsigned int rdata;
-  rdata = getps(XS1_PS_XCORE_CTRL0);
+// Defines for SETPADCTRL
 
-  // Clear RGMII enable to get a posedge
-  setps(XS1_PS_XCORE_CTRL0,  XS1_XCORE_CTRL0_RGMII_ENABLE_SET(rdata, 0x0));
-  // Set all control values now
-  setps(XS1_PS_XCORE_CTRL0, XS1_XCORE_CTRL0_RGMII_DELAY_SET (
-        XS1_XCORE_CTRL0_RGMII_DIVIDE_SET(
-          XS1_XCORE_CTRL0_RGMII_ENABLE_SET(rdata, 0x1), divide), delay));
-#else
-  fail("RGMII not available on XS1");
-#endif
-}
+#define DR_STR_2mA     0
+#define DR_STR_4mA     1
+#define DR_STR_8mA     2
+#define DR_STR_12mA    3
 
-void rgmii_configure_ports(in port p_rxclk, in buffered port:1 p_rxer,
-                           in buffered port:32 p_rxd_1000, in buffered port:32 p_rxd_10_100,
-                           in buffered port:4 p_rxd_interframe,
-                           in port p_rxdv, in port p_rxdv_interframe,
-                           in port p_txclk_in, out port p_txclk_out,
-                           out port p_txer, out port p_txen,
+#define PORT_PAD_CTL_SMT    0           // Schmitt off
+#define PORT_PAD_CTL_SR     1           // Fast slew
+#define PORT_PAD_CTL_DR_STR DR_STR_8mA  // 8mA drive
+#define PORT_PAD_CTL_REN    1           // Receiver enabled
+#define PORT_PAD_CTL_MODE   0x0006
+
+#define PORT_PAD_CTL ((PORT_PAD_CTL_SMT     << 23) | \
+                      (PORT_PAD_CTL_SR      << 22) | \
+                      (PORT_PAD_CTL_DR_STR  << 20) | \
+                      (PORT_PAD_CTL_REN     << 17) | \
+                      (PORT_PAD_CTL_MODE    << 0))
+                      
+#define HIGH_DRIVE_8MA
+
+void rgmii_configure_ports(in port p_rxclk, in port p_rxdv, in buffered port:1 p_rxer,
+                           in buffered port:32 p_rxd_1000,
+                           out port p_txclk, out port p_txen, out port p_txer,
                            out buffered port:32 p_txd,
-                           clock rxclk,
-                           clock rxclk_interframe,
-                           clock txclk,
-                           clock txclk_out)
+                           clock rxclk, clock txclk)
 {
-  // Configure the ports for 1G
+  
+  // Set output ports to 8mA drive strength
+#ifdef HIGH_DRIVE_8MA
+    asm volatile ("setc res[%0], %1" :: "r" (p_txclk), "r" (PORT_PAD_CTL));
+    asm volatile ("setc res[%0], %1" :: "r" (p_txen) , "r" (PORT_PAD_CTL));
+    asm volatile ("setc res[%0], %1" :: "r" (p_txer) , "r" (PORT_PAD_CTL));
+    asm volatile ("setc res[%0], %1" :: "r" (p_txd)  , "r" (PORT_PAD_CTL));
+#endif
+  
+  // RX ports
   configure_clock_src(rxclk, p_rxclk);
-  set_port_inv(p_rxclk);
   configure_in_port_strobed_slave(p_rxd_1000, p_rxdv, rxclk);
-  configure_in_port_strobed_slave(p_rxd_10_100, p_rxdv, rxclk);
-
-  // Configure port used to read the data when DV is low
-  configure_clock_src(rxclk_interframe, p_rxclk);
-  set_port_inv(p_rxdv_interframe);
-  configure_in_port_strobed_slave(p_rxd_interframe, p_rxdv_interframe, rxclk_interframe);
-
-  // Configure the TX ports
-  configure_clock_src(txclk, p_txclk_in);
-  configure_out_port_strobed_master(p_txd, p_txen, txclk, 0);
-  configure_out_port(p_txer, txclk, 0);
-
   // Ensure that the error port is running fast enough to catch errors
   configure_in_port_strobed_slave(p_rxer, p_rxdv, rxclk);
 
-  configure_clock_src(txclk_out, p_txclk_in);
-  configure_port_clock_output(p_txclk_out, txclk_out);
+  // TX ports
+  configure_clock_xcore(txclk, 3); // Tile clock divided by 6
+  configure_port_clock_output(p_txclk, txclk);
+  configure_out_port_strobed_master(p_txd, p_txen, txclk, 0);
+  configure_out_port(p_txer, txclk, 0);
 
-  set_port_inv(p_txclk_out);
-  set_port_inv(p_txclk_in);
-  set_clock_fall_delay(txclk, 2);
-  set_clock_rise_delay(txclk, 0);
-  set_clock_fall_delay(txclk_out, 0);
-  set_clock_rise_delay(txclk_out, 1);
-
-  set_clock_rise_delay(rxclk, 0);
-  set_clock_fall_delay(rxclk, 0);
+  // Need to tune the following value to find middle of data eye.
+  set_clock_rise_delay(rxclk, 3);
+  set_clock_fall_delay(rxclk, 3);
 
   // Start the clocks
   start_clock(txclk);
-  start_clock(txclk_out);
   start_clock(rxclk);
-  start_clock(rxclk_interframe);
 }
 
 void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const unsigned n_rx_lp,
@@ -134,10 +124,11 @@ void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const uns
     int speed_change_ids[6];
     rgmii_inband_status_t current_mode = INITIAL_MODE;
 
-    rgmii_configure_ports(rgmii_ports.p_rxclk, rgmii_ports.p_rxer, rgmii_ports.p_rxd_1000, rgmii_ports.p_rxd_10_100,
-                          rgmii_ports.p_rxd_interframe, rgmii_ports.p_rxdv, rgmii_ports.p_rxdv_interframe,
-                          rgmii_ports.p_txclk_in, rgmii_ports.p_txclk_out, rgmii_ports.p_txer, rgmii_ports.p_txen, rgmii_ports.p_txd,
-                          rgmii_ports.rxclk, rgmii_ports.rxclk_interframe, rgmii_ports.txclk, rgmii_ports.txclk_out);
+    rgmii_configure_ports(rgmii_ports.p_rxclk, rgmii_ports.p_rxdv, rgmii_ports.p_rxer,
+                          rgmii_ports.p_rxd_1000,
+                          rgmii_ports.p_txclk, rgmii_ports.p_txen, rgmii_ports.p_txer,
+                          rgmii_ports.p_txd,
+                          rgmii_ports.rxclk, rgmii_ports.txclk);
 
     log_speed_change_pointers(speed_change_ids);
     c_speed_change = (streaming chanend * unsafe)speed_change_ids;
@@ -162,7 +153,8 @@ void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const uns
       buffers_free_initialize(free_buffers_tx_hp, (unsigned char*)buffer_tx_hp,
                               buffer_free_pointers_tx_hp, RGMII_MAC_BUFFER_COUNT_TX);
 
-      if (current_mode == INBAND_STATUS_100M_FULLDUPLEX_UP ||
+      // Disable MII (10/100) for now.
+/*       if (current_mode == INBAND_STATUS_100M_FULLDUPLEX_UP ||
           current_mode == INBAND_STATUS_100M_FULLDUPLEX_DOWN ||
           current_mode == INBAND_STATUS_10M_FULLDUPLEX_UP ||
           current_mode == INBAND_STATUS_10M_FULLDUPLEX_DOWN)
@@ -214,6 +206,7 @@ void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const uns
         }
       }
       else
+       */
       {
         mii_macaddr_set_num_active_filters(2);
 
@@ -229,13 +222,13 @@ void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const uns
             par {
               {
                 rgmii_rx_lld(c_rx_to_manager[0], c_ping_pong, 0, c_speed_change[1],
-			                       *p_rxd_1000_unsafe, *p_rxdv_unsafe, *p_rxer_unsafe);
+                            *p_rxd_1000_unsafe, *p_rxdv_unsafe, *p_rxer_unsafe);
                 empty_channel(c_rx_to_manager[0]);
                 empty_channel(c_ping_pong);
               }
               {
                 rgmii_rx_lld(c_rx_to_manager[1], c_ping_pong, 1, c_speed_change[2],
-			                       *p_rxd_1000_unsafe, *p_rxdv_unsafe, *p_rxer_unsafe);
+                            *p_rxd_1000_unsafe, *p_rxdv_unsafe, *p_rxer_unsafe);
                 empty_channel(c_rx_to_manager[1]);
                 empty_channel(c_ping_pong);
               }
@@ -252,7 +245,7 @@ void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const uns
 
           {
             rgmii_ethernet_rx_server((rx_client_state_t *)p_rx_client_state_lp, i_rx_lp, n_rx_lp,
-                                     c_rx_hp, c_rgmii_cfg, rgmii_ports.p_rxd_interframe,
+                                     c_rx_hp, c_rgmii_cfg, //rgmii_ports.p_rxd_interframe,
                                      *p_used_buffers_rx_lp, *p_used_buffers_rx_hp,
                                      *p_free_buffers_rx, current_mode, speed_change_ids,
                                      p_port_state);

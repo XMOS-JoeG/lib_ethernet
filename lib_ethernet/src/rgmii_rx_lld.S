@@ -71,7 +71,7 @@ mii_count_len_error:
 .cc_bottom rxconsts.data
 
 .text
-#if defined(__XS2A__)
+#if defined(__XS2A__) || defined(__XS3A__)
         .cc_top rgmii_rx_lld.function
         .set    rgmii_rx_lld.nstackwords,SP_NUM_WORDS
         .globl  rgmii_rx_lld.nstackwords

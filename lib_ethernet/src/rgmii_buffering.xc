@@ -342,7 +342,7 @@ unsafe static void drop_lp_packets(rx_client_state_t client_states[n], unsigned 
   }
 }
 
-unsafe rgmii_inband_status_t get_current_rgmii_mode(in buffered port:4 p_rxd_interframe,
+/* unsafe rgmii_inband_status_t get_current_rgmii_mode(in buffered port:4 p_rxd_interframe,
                                                     rgmii_inband_status_t last_mode,
                                                     int speed_change_ids[6])
 {
@@ -383,13 +383,13 @@ unsafe rgmii_inband_status_t get_current_rgmii_mode(in buffered port:4 p_rxd_int
   }
   __builtin_unreachable();
   return last_mode;
-}
+} */
 
 unsafe void rgmii_ethernet_rx_server(rx_client_state_t client_state_lp[n_rx_lp],
                                      server ethernet_rx_if i_rx_lp[n_rx_lp], unsigned n_rx_lp,
                                      streaming chanend ? c_rx_hp,
                                      streaming chanend c_rgmii_cfg,
-                                     in buffered port:4 p_rxd_interframe,
+                                     //in buffered port:4 p_rxd_interframe,
                                      buffers_used_t &used_buffers_rx_lp,
                                      buffers_used_t &used_buffers_rx_hp,
                                      buffers_free_t &free_buffers,
@@ -404,13 +404,13 @@ unsafe void rgmii_ethernet_rx_server(rx_client_state_t client_state_lp[n_rx_lp],
 
   set_core_fast_mode_on();
 
-  if (current_mode == INBAND_STATUS_1G_FULLDUPLEX_UP ||
+/*   if (current_mode == INBAND_STATUS_1G_FULLDUPLEX_UP ||
       current_mode == INBAND_STATUS_1G_FULLDUPLEX_DOWN) {
     enable_rgmii(RGMII_DELAY, RGMII_DIVIDE_1G);
   }
   else {
     enable_rgmii(RGMII_DELAY_100M, RGMII_DIVIDE_100M);
-  }
+  } */
 
   ethernet_link_state_t cur_link_state = p_port_state->link_state;
 
@@ -469,12 +469,17 @@ unsafe void rgmii_ethernet_rx_server(rx_client_state_t client_state_lp[n_rx_lp],
         break;
 
       case tmr when timerafter(t) :> t:
-        rgmii_inband_status_t new_mode = get_current_rgmii_mode(p_rxd_interframe, current_mode, speed_change_ids);
+        //rgmii_inband_status_t new_mode = get_current_rgmii_mode(p_rxd_interframe, current_mode, speed_change_ids);
+        // We now have no interframe data to show mode status.
+        // Options to detect mode change:
+        //  1.) measure rx clock freq has changed (gigabit = 125MHz, 100M = 25MHz, 10M - 2.5MHz
+        //  2.) look for interrupt from phy set to only interrupt on link down or speed change - can be sticky etc.
+        //  3.) Read SMI regs - too slow to do inbetween packets. Could have this done in another thread entirely and passed in?
 
-        if (new_mode != current_mode) {
+/*         if (new_mode != current_mode) {
           current_mode = new_mode;
           done = 1;
-        }
+        } */
 
         t += rgmii_mode_poll_period_ms * XS1_TIMER_KHZ;
         break;

@@ -20,7 +20,7 @@ saved_word3:
 .cc_bottom notification_channel_ids.globl
 
 .text
-#if defined(__XS2A__)
+#if defined(__XS2A__) || defined(__XS3A__)
         .cc_top log_speed_change_pointers.function
         .set    log_speed_change_pointers.nstackwords,0
         .globl  log_speed_change_pointers.nstackwords

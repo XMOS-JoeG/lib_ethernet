@@ -216,7 +216,7 @@ unsafe void rgmii_10_100_master_rx_pins(streaming chanend c,
 
 {unsigned, unsigned} zip2(unsigned a, unsigned b)
 {
-#if defined(__XS2A__)
+#if defined(__XS2A__) || defined(__XS3A__)
   unsigned tmp1;
   unsigned tmp2;
   asm("mov %0, %2;"

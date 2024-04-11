@@ -29,7 +29,7 @@
 
 #define MAX_PACKET_WORDS (ETHERNET_MAX_PACKET_SIZE/4)
 
-#if defined(__XS2A__)
+#if defined(__XS2A__) || defined(__XS3A__)
 .align 4
 .section .dp.data, "awd", @progbits
 .cc_top txconsts.data
