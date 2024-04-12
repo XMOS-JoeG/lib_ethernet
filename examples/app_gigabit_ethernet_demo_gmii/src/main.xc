@@ -82,7 +82,7 @@ void vsc8541_phy_driver(client interface smi_if smi,
 
   #define EXTENDED_REGISTER_PAGE_ADDR  31
   #define VSC8541_WOL_AND_MAC_IF_CTRL_ADDR 27
-  #define VSC8541_PAD_EDGE_RATE 3
+  #define VSC8541_PAD_EDGE_RATE 2 // Setting +2 works well with 33R series terminator and 50 ohm trace.
   // Set up any relevant registers here - check procedure in datasheet. Things like MAC pad edge rate etc.
 
   // Read modify Write Wake-on-LAN and MAC Interface control register to set the pad edge rate.
