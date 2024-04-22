@@ -38,14 +38,14 @@ void rgmii_configure_ports(in port p_rxclk, in port p_rxdv, in buffered port:1 p
                            clock rxclk, clock txclk)
 {
   
-  // Set output ports to 8mA drive strength
 #ifdef HIGH_DRIVE_8MA
-    asm volatile ("setc res[%0], %1" :: "r" (p_txclk), "r" (PORT_PAD_CTL));
-    asm volatile ("setc res[%0], %1" :: "r" (p_txen) , "r" (PORT_PAD_CTL));
-    asm volatile ("setc res[%0], %1" :: "r" (p_txer) , "r" (PORT_PAD_CTL));
-    asm volatile ("setc res[%0], %1" :: "r" (p_txd)  , "r" (PORT_PAD_CTL));
+  // Set output ports to 8mA drive strength
+  asm volatile ("setc res[%0], %1" :: "r" (p_txclk), "r" (PORT_PAD_CTL));
+  asm volatile ("setc res[%0], %1" :: "r" (p_txen) , "r" (PORT_PAD_CTL));
+  asm volatile ("setc res[%0], %1" :: "r" (p_txer) , "r" (PORT_PAD_CTL));
+  asm volatile ("setc res[%0], %1" :: "r" (p_txd)  , "r" (PORT_PAD_CTL));
 #endif
-  
+
   // RX ports
   configure_clock_src(rxclk, p_rxclk);
   configure_in_port_strobed_slave(p_rxd_1000, p_rxdv, rxclk);

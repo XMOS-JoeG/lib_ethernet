@@ -140,7 +140,7 @@ int main()
     on tile[0]: icmp_server(i_cfg[CFG_TO_ICMP],
                             i_rx[ETH_TO_ICMP], i_tx[ETH_TO_ICMP],
                             ip_address, otp_ports);
-                           
+
   }
   return 0;
 }
