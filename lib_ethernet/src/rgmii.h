@@ -22,9 +22,9 @@ void rgmii_rx_lld(streaming chanend c,
                   streaming chanend ping_pong,
                   int first,
                   streaming chanend c_speed_change,
-                  in buffered port:32 p_rxd_1000,
-                  in port p_rxdv,
-                  in buffered port:1 p_rxer);
+                  in buffered port:32 p_rxd_ms,
+                  in buffered port:32 p_rxd_ls,
+                  in port p_rxdv);
 
 void rgmii_tx_lld(streaming chanend c,
                   out buffered port:32 p_txd,

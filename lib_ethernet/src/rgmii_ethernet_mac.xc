@@ -9,6 +9,7 @@
 #include "macaddr_filter_hash.h"
 #include "rgmii_consts.h"
 #include "debug_print.h"
+#include <platform.h>
 
 // Defines for SETPADCTRL
 
@@ -28,9 +29,102 @@
                       (PORT_PAD_CTL_DR_STR  << 20) | \
                       (PORT_PAD_CTL_REN     << 17) | \
                       (PORT_PAD_CTL_MODE    << 0))
-                      
-#define HIGH_DRIVE_8MA
 
+void rgmii_configure_ports(in port p_rxc, in port p_rx_ctl, in buffered port:32 p_rxd_ms, in buffered port:32 p_rxd_ls,
+                           out port p_txc, out port p_tx_ctl, out buffered port:32 p_txd,
+                           clock rxclk, clock txclk_2x, clock txclk_1x)
+{
+    debug_printf("Config Ports\n");
+    // Setup 2x clock
+    #define RGMII_2XCLK_DELAY 2
+    //configure_clock_ref(txclk_2x, 0);
+    configure_clock_xcore(txclk_2x, 2);
+    set_clock_rise_delay(txclk_2x, RGMII_2XCLK_DELAY);
+    set_clock_fall_delay(txclk_2x, RGMII_2XCLK_DELAY);
+    start_clock(txclk_2x);
+
+    // Setup 1x clock
+    #define RGMII_1XCLK_DELAY 0
+    //configure_clock_ref(txclk_1x, 1);
+    configure_clock_xcore(txclk_1x, 4);
+    set_clock_rise_delay(txclk_1x, RGMII_1XCLK_DELAY);
+    set_clock_fall_delay(txclk_1x, RGMII_1XCLK_DELAY);
+    start_clock(txclk_1x);
+
+    // Init TXD
+    configure_out_port_strobed_master(p_txd, p_tx_ctl, txclk_2x, 0);
+    //clearbuf(p_txd);
+    
+    //configure_out_port(p_dummy, txclk_2x, 0);
+    //configure_out_port(p_dummy_1x, txclk_1x, 0);
+    
+    // Init TX_CTL
+    //port_enable(p_tx_ctl);
+    //port_set_out_ready(p_tx_ctl, p_txd);
+
+    // Init TXC
+    //port_enable(p_txc);
+    //port_set_clock(p_txc, clock_tx_1x);
+    //port_set_out_clock(p_txc);
+    
+    configure_port_clock_output(p_txc, txclk_1x);
+    
+    stop_clock(txclk_2x);
+    stop_clock(txclk_1x);
+    
+    // Set sw ref clock to 10MHz from 750MHz PLL clock
+    write_node_config_reg(tile[0], XS1_SSWITCH_REF_CLK_DIVIDER_NUM, 74);
+    delay_ticks(5);
+    // Need to start clock blocks in successive instructions
+    asm volatile ("setc res[%0], 0xF \n"
+                  "setc res[%1], 0xF"
+                  //        %0            %1
+                  :: "r" (txclk_1x), "r" (txclk_2x));
+    
+    // Set sw ref clock to 250MHz from 750MHz PLL clock
+    write_node_config_reg(tile[0], XS1_SSWITCH_REF_CLK_DIVIDER_NUM, 2);
+    
+    // Is a possible alternative to stop both clocks, stop the sw_ref_clk using the divider, start both clocks then start the sw_ref clk using the divider?
+    // or, set sw_ref_clk to very slow, 10MHz or so. Stop both clocks, then restart both clocks then up sw_ref_clk speed.
+    //"// update the counter when the counter rolls over or if the divide ratio is written too. The ratio is 
+      // maintained while the divider is disabled, when the divider is enabled it will start working immediately
+    
+    // Set 8mA drive strength
+    asm volatile ("setc res[%0], %1" :: "r" (p_txd), "r" (PORT_PAD_CTL));
+    asm volatile ("setc res[%0], %1" :: "r" (p_txc), "r" (PORT_PAD_CTL));
+    asm volatile ("setc res[%0], %1" :: "r" (p_tx_ctl), "r" (PORT_PAD_CTL));
+    
+    // Init RXC
+    #define RGMII_RXCLK_DELAY 1
+    configure_clock_src(rxclk, p_rxc);
+    set_clock_rise_delay(rxclk, RGMII_RXCLK_DELAY);
+    set_clock_fall_delay(rxclk, RGMII_RXCLK_DELAY);
+    start_clock(rxclk);
+
+    // Init RXD LS Nibble
+    configure_in_port_strobed_slave(p_rxd_ls, p_rx_ctl, rxclk);
+    
+    // Init RXD MS Nibble
+    configure_in_port_strobed_slave(p_rxd_ms, p_rx_ctl, rxclk);
+    // clock in on neg edge
+    set_port_sample_delay(p_rxd_ms);
+    
+    //set_pad_delay(p_rxd_ms, 2);
+    //set_pad_delay(p_rxd_ls, 2);
+    //set_pad_delay(p_rx_ctl, 2);
+
+    
+    // Init rX_CTL
+   // port_enable(p_rx_ctl);
+    //port_set_out_ready(p_rx_ctl, p_rxd);
+
+    // Init RXC
+/*     port_enable(p_rxc);
+    port_set_clock(p_rxc, rxclk); */
+    //printf("Finished RX Init\n");
+}
+
+/*
 void rgmii_configure_ports(in port p_rxclk, in port p_rxdv, in buffered port:1 p_rxer,
                            in buffered port:32 p_rxd_1000,
                            out port p_txclk, out port p_txen, out port p_txer,
@@ -66,6 +160,7 @@ void rgmii_configure_ports(in port p_rxclk, in port p_rxdv, in buffered port:1 p
   start_clock(txclk);
   start_clock(rxclk);
 }
+*/
 
 void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const unsigned n_rx_lp,
                         server ethernet_tx_if i_tx_lp[n_tx_lp], static const unsigned n_tx_lp,
@@ -113,9 +208,15 @@ void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const uns
     buffers_used_t * unsafe p_used_buffers_rx_lp = &used_buffers_rx_lp;
     buffers_used_t * unsafe p_used_buffers_rx_hp = &used_buffers_rx_hp;
     buffers_free_t * unsafe p_free_buffers_rx = &free_buffers_rx;
-    in buffered port:32 * unsafe p_rxd_1000_unsafe = &rgmii_ports.p_rxd_1000;
+    
+/*     in buffered port:32 * unsafe p_rxd_1000_unsafe = &rgmii_ports.p_rxd_1000;
     in port * unsafe p_rxdv_unsafe = &rgmii_ports.p_rxdv;
-    in buffered port:1 * unsafe p_rxer_unsafe = &rgmii_ports.p_rxer;
+    in buffered port:1 * unsafe p_rxer_unsafe = &rgmii_ports.p_rxer; */
+    
+    in buffered port:32 * unsafe p_rxd_ls_unsafe = &rgmii_ports.p_rxd_ls;
+    in buffered port:32 * unsafe p_rxd_ms_unsafe = &rgmii_ports.p_rxd_ms;
+    in port * unsafe p_rxdv_unsafe = &rgmii_ports.p_rx_ctl;
+    
     rx_client_state_t * unsafe p_rx_client_state_lp =
       (rx_client_state_t * unsafe)&rx_client_state_lp[0];
 
@@ -124,11 +225,9 @@ void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const uns
     int speed_change_ids[6];
     rgmii_inband_status_t current_mode = INITIAL_MODE;
 
-    rgmii_configure_ports(rgmii_ports.p_rxclk, rgmii_ports.p_rxdv, rgmii_ports.p_rxer,
-                          rgmii_ports.p_rxd_1000,
-                          rgmii_ports.p_txclk, rgmii_ports.p_txen, rgmii_ports.p_txer,
-                          rgmii_ports.p_txd,
-                          rgmii_ports.rxclk, rgmii_ports.txclk);
+    rgmii_configure_ports(rgmii_ports.p_rxc, rgmii_ports.p_rx_ctl, rgmii_ports.p_rxd_ms, rgmii_ports.p_rxd_ls,
+                           rgmii_ports.p_txc, rgmii_ports.p_tx_ctl, rgmii_ports.p_txd,
+                           rgmii_ports.rxclk, rgmii_ports.txclk_2x, rgmii_ports.txclk_1x);
 
     log_speed_change_pointers(speed_change_ids);
     c_speed_change = (streaming chanend * unsafe)speed_change_ids;
@@ -218,17 +317,23 @@ void rgmii_ethernet_mac(server ethernet_rx_if i_rx_lp[n_rx_lp], static const uns
           }
 
           {
-            clearbuf(*p_rxd_1000_unsafe);
-            par {
+            clearbuf(*p_rxd_ms_unsafe);
+            clearbuf(*p_rxd_ls_unsafe);
+            par
+            {
               {
+/*                 rgmii_rx_lld(c_rx_to_manager[0], c_ping_pong, 0, c_speed_change[1],
+                            *p_rxd_1000_unsafe, *p_rxdv_unsafe, *p_rxer_unsafe); */
                 rgmii_rx_lld(c_rx_to_manager[0], c_ping_pong, 0, c_speed_change[1],
-                            *p_rxd_1000_unsafe, *p_rxdv_unsafe, *p_rxer_unsafe);
+                            *p_rxd_ms_unsafe, *p_rxd_ls_unsafe, *p_rxdv_unsafe);
                 empty_channel(c_rx_to_manager[0]);
                 empty_channel(c_ping_pong);
               }
               {
+/*                 rgmii_rx_lld(c_rx_to_manager[1], c_ping_pong, 1, c_speed_change[2],
+                            *p_rxd_1000_unsafe, *p_rxdv_unsafe, *p_rxer_unsafe); */
                 rgmii_rx_lld(c_rx_to_manager[1], c_ping_pong, 1, c_speed_change[2],
-                            *p_rxd_1000_unsafe, *p_rxdv_unsafe, *p_rxer_unsafe);
+                            *p_rxd_ms_unsafe, *p_rxd_ls_unsafe, *p_rxdv_unsafe);
                 empty_channel(c_rx_to_manager[1]);
                 empty_channel(c_ping_pong);
               }

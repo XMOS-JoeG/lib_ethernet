@@ -4,8 +4,10 @@
 #include "mii_buffering_defines.h"
 
 // Register allocation. Don't re-map r11 as some instructions must write to it
-#define chan      r0
-#define p_rxd     r1
+//#define chan      r0
+#define p_rxd_ls  r0
+#define p_rxd_ms  r1
+// need to add a p_rxd_ls register ... hopefully we can save somewhere else
 #define tmp5      r2
 #define tmp4      r3
 #define base      r4
@@ -15,6 +17,7 @@
 #define tmp1      r8
 #define tmp2      r9
 #define tmp3      r10
+//#define p_rxd_ls  r10
 
 // Stack offsets - NOTE: SPC offset is fixed
 #define SP_SPC              1
@@ -29,10 +32,14 @@
 #define SP_REGISTER_SAVE_4 10
 #define SP_REGISTER_SAVE_5 11
 #define SP_REGISTER_SAVE_6 12
-#define SP_NUM_WORDS       13+1 // Extend to even number to conform to XS2 ABI
+#define SP_CHAN            13 // Added JEG
+//#define SP_NUM_WORDS       13+1 // Extend to even number to conform to XS2 ABI
+#define SP_NUM_WORDS       14 // JEG to keep as even number
 
-#define SP_RX_ERR        (SP_NUM_WORDS + 3)
-#define SP_RX_DV         (SP_NUM_WORDS + 2)
+//#define SP_RX_ERR        (SP_NUM_WORDS + 3) not using RX_ERROR
+#define SP_RXD_MS        (SP_NUM_WORDS + 1)
+#define SP_RXD_LS        (SP_NUM_WORDS + 2)
+#define SP_RX_DV         (SP_NUM_WORDS + 3)
 
 .section .dp.data, "awd", @progbits
 .cc_top rxconsts.data
@@ -40,7 +47,7 @@
 .align 4
 .globl sof_value
 sof_value:
-.word 0xd5
+.word 0xD
 .globl crc_poly
 crc_poly:
 .word 0xEDB88320
@@ -71,7 +78,7 @@ mii_count_len_error:
 .cc_bottom rxconsts.data
 
 .text
-#if defined(__XS2A__) || defined(__XS3A__)
+#if defined(__XS3A__)
         .cc_top rgmii_rx_lld.function
         .set    rgmii_rx_lld.nstackwords,SP_NUM_WORDS
         .globl  rgmii_rx_lld.nstackwords
@@ -102,7 +109,9 @@ rgmii_rx_lld:
         ldap r11, rx_speed_change_handler
         setv res[r3], r11
         eeu res[r3]
-        setsr XS1_SR_EEBLE_SET(0, 1)
+        
+        // Take this out as it will mean an event basically becomes an interrupt and fires immediatey. A waiteu essentially enables events then waits for it
+        //setsr XS1_SR_EEBLE_SET(0, 1)
 
         bu start_gigabit_rx
 
@@ -138,8 +147,12 @@ start_gigabit_rx:
         ldap r11, crc_poly
         ldw poly, r11[0]
 
-        // Receive address of packet buffer // Get RXD off the stack
-        { in base, res[chan]              ; ldw p_rxd, sp[SP_NUM_WORDS + 1] }
+        // Receive address of packet buffer // Get RXD_MS off the stack
+        { in base, res[r0]              ; ldw p_rxd_ms, sp[SP_RXD_MS] }
+        // store channel onto stack JEG
+        stw r0, sp[SP_CHAN]
+
+        ldw p_rxd_ls, sp[SP_RXD_LS]
 
         // Compute the minimum valid packet size before 4 for the CRC
         ldc r11, 60 + 4
@@ -151,914 +164,247 @@ start_gigabit_rx:
         // Setup the RXD data pattern (SOF)
         ldap r11, sof_value
         ldw r11, r11[0]
-        setd res[p_rxd], r11
+        setd res[p_rxd_ms], r11
 
         // Setup the RXER port to detect the port going high
-        { ldc r11, 1                      ; ldw tmp3, sp[SP_RX_ERR] }
-        setd res[tmp3], r11
-        ldap r11, rx_error
-        setv res[tmp3], r11
-        setc res[tmp3], XS1_SETC_IE_MODE_INTERRUPT
-        eeu res[tmp3]
-        setc res[tmp3], XS1_SETC_COND_EQ
+        // { ldc r11, 1                      ; ldw tmp3, sp[SP_RX_ERR] }
+        // setd res[tmp3], r11
+        // ldap r11, rx_error
+        // setv res[tmp3], r11
+        // setc res[tmp3], XS1_SETC_IE_MODE_INTERRUPT
+        // eeu res[tmp3]
+        // setc res[tmp3], XS1_SETC_COND_EQ
 
         // Setup the RXDV data
         { ldc r11, 0                      ; ldw tmp4, sp[SP_RX_DV] }
         setd res[tmp4], r11
         ldap r11, rx_done
         setv res[tmp4], r11
-        setc res[tmp4], XS1_SETC_IE_MODE_INTERRUPT
-        eeu res[tmp4]
+        //setc res[tmp4], XS1_SETC_IE_MODE_INTERRUPT // JEG leave the port in EVENT mode.
+        //eeu res[tmp4] moved this to later after rx_dv has gone high
 
         // Initially only one of the ping-pong threads must setup the ports and start
         bu rx_dont_wait
 
 rx_sof:
-        { setsr XS1_SR_EEBLE_SET(0, 1)    ; bu rx_aligned }
+        //{ setsr XS1_SR_EEBLE_SET(0, 1)    ; bu rx_aligned }
 
 .align 16
 rx_aligned:
         // Wait for ownership in the ping-pong (assume tmp1 contains the channel ID)
         // and load RX_ERR into tmp3 so that it is available for the error handler code
-        { in tmp1, res[tmp1]              ; ldw tmp3, sp[SP_RX_ERR] }
+        //{ in tmp1, res[tmp1]              ; ldw tmp3, sp[SP_RX_ERR] }
+        in tmp1, res[tmp1]
 
 rx_dont_wait:
         // Take ownership of the error port // Offset of data within the mii_packet_t structure
-        { setc res[tmp3], XS1_SETC_COND_EQ ; ldc ptr, MII_PACKET_HEADER_BYTES }
+        //{ setc res[tmp3], XS1_SETC_COND_EQ ; ldc ptr, MII_PACKET_HEADER_BYTES }
+        ldc ptr, MII_PACKET_HEADER_BYTES
 
         // Setup the condition on the data port for the SOF
-        // Load RX_DV into tmp4 so that it is available for the error handler code
-        { setc res[p_rxd], XS1_SETC_COND_EQ ; ldw tmp5, sp[SP_RX_DV] }
+        // Load RX_DV into tmp5 so that it is available for the error handler code
+        { setc res[p_rxd_ms], XS1_SETC_COND_EQ ; ldw tmp5, sp[SP_RX_DV] }
 
         // Setup the condition on the data valid port for the EOF
                                            // Indicate that a minimum sized frame has not arrived yet
         { setc res[tmp5], XS1_SETC_COND_EQ ; ldc r11, 0 }
 
         // Wait for the SOF               // Read the timestamp
-        { in tmp1, res[p_rxd]             ; gettime tmp2 }
-
+        { in tmp1, res[p_rxd_ms]           ; gettime tmp2 }
+        // Get ls word and discard         // Store off the timestamp
+        { in tmp1, res[p_rxd_ls]           ; stw tmp2, base[1] }
+    
         //                                // Store off the timestamp
-        { setsr XS1_SR_IEBLE_SET(0, 1)    ; stw tmp2, base[1] }
+       // { setsr XS1_SR_IEBLE_SET(0, 1)    ; stw tmp2, base[1] } // JEG old interrupt
+        // Enable events for data valid port (data valid going low). Data valid must be high already here to have received the SOF.
+        eeu res[tmp5]
 
 rx_data:
         //                                // Don't store SOF (would overwrite timestamp)
-        { in tmp1, res[p_rxd]             ; add ptr, base, ptr }
+        //{ in tmp1, res[p_rxd]             ; add ptr, base, ptr }
 
         //                                // Number of bits required for two INs after ENDIN
-        { not crc, tmp1                   ; ldc tmp4, 33 }
+        //{ not crc, tmp1                   ; ldc tmp4, 33 }
 
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp2, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp2, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; ldw r11, sp[SP_PING_PONG] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-        { in tmp1, res[p_rxd]             ; stw tmp1, ptr[0] }
-        crc32_inc crc, tmp1, poly, ptr, 4
 
-        // Packet too large, throw it away as an error
-        bu rx_error_too_long
+        // Input word from ms port          // Don't store SOF (would overwrite timestamp)
+        { in tmp1, res[p_rxd_ms]            ; add ptr, base, ptr }
+        // Input word from ls port          // Load PC relative address for the rx_data_loop into r11)
+        { in tmp5, res[p_rxd_ls]            ; ldap r11, rx_data_loop }
+        // ZIP two input words to form 64 bit result in same regs
+        zip tmp1, tmp5, 2
+        // Init crc as ~tmp5 (first word)   // Number of bits required for two INs after ENDIN
+        { not crc, tmp5                     ; ldc tmp4, 17 }
+        // CRC only on second word
+        crc32 crc, tmp1, poly
+        setv res[p_rxd_ms], r11
+        // Enable events for MS data port
+        eeu res[p_rxd_ms]
+        waiteu
+        
+rx_data_loop:
+        // Input word from ms port          // Store previous (zipped) ms word to mem
+        { in tmp1, res[p_rxd_ms]            ; stw tmp1, ptr[1] }
+        // Input word from ls port          // Store previous (zipped) ls word to mem
+        { in tmp5, res[p_rxd_ls]            ; stw tmp5, ptr[0] }
+        // ZIP two input words to form 64 bit result in same regs
+        zip tmp1, tmp5, 2
+        // CRC and increment address pointer by 8
+        crc32_inc crc, tmp5, poly, ptr, 8
+        // CRC only
+        crc32  crc, tmp1, poly
+        waiteu
 
-.align 16
-rx_runt:
-        // Setup registers used by start of frame code // Restore the DV ID
-        { setc res[p_rxd], XS1_SETC_RUN_CLRBUF ; ldw tmp4, sp[SP_RX_DV] }
+//*** FROM HERE CHANGE tmp3 if needed remember we're now using it for p_rxd_ls ***
 
-        // Clear data from the DV port
-        { in r11, res[tmp4]               ; ldw tmp3, sp[SP_RX_ERR] }
 
-        // Runt received, just start next frame
-        bu rx_dont_wait
+// Take this out for now but if we want a runt (short) packet check we can just look at ptr - base < 60?
+//.align 16
+//rx_runt:
+//        // Clear buffers in data ports            // Restore the DV ID
+//        { setc res[p_rxd_ms], XS1_SETC_RUN_CLRBUF ; ldw tmp4, sp[SP_RX_DV] }
+//        setc res[p_rxd_ls], XS1_SETC_RUN_CLRBUF
+//
+//        // Clear data from the DV port
+//        //{ in r11, res[tmp4]               ; ldw tmp3, sp[SP_RX_ERR] }
+//        in r11, res[tmp4]
+//
+//        // Runt received, just start next frame
+//        bu rx_dont_wait
+
+//*** FROM HERE CHANGE tmp3 if needed remember we're now using it for p_rxd_ls ***
+//maybe use tmp1 instead?
+//By the time we have interrupted for dv detected low the ports have already stopped getting data but we may have not collected it yet.
+//We should have complete (whole) bytes so both port buffers will have same amount of data in.
+
+//** initially assume we have equal amount of data in ms and ls port buffers ** this may not be case if in of p_rxd_ms completes before interrupt ... then we'd need to do separate endins. 
+//** well, we can say, do an endin on ls port and if different then we know we need to do the in?
+
+//** remember we still have to store off the words from last zip ***
+
+// I think all we can do is:
+// 1.) Store all data we can from ports - endin and port buffers. (tmp1 and tmp5 may/will still have data in also from the last time so we need to put
+// 2.) signal to ping pong thread it can now use ports
+// 3.) post process all the data to sort it all out. We now have enough time. (time for a whole packet to run in other thread which could be short so not that long).
+
+
+// New method, endin. If 0 we are done , could also be 4, 8, 12, 16 etc. One extra byte would be 4, two 8, three 12, four 16, five 20, six 24, seven 28, don't think 32 is possible but if so 8 extra bytes.
+// If endin is not zero we need to do INs from both MS and LS and do zip as normal then work on that 64 bit result.
+
 
 .align 16
 rx_done:
-        // Release the last bytes in port // Restore ping-pong channel from stack
-        { endin tmp3, res[p_rxd]          ; bf r11, rx_runt }
+        // store off the words from last loop (check tmp1 and tmp5 are right way round)
+        //std tmp1, tmp5, ptr[0]
+        // Release the last bytes in port // Check if we received more than minimum packet length
+                                          // r11 is init to 0 and only set (to ping pong channel res ID) when past min number of INs
+        // use tmp1 for now but will have to change it has data in it we haven't stored yet! - lets see what it is.
+        //{ endin tmp3, res[p_rxd_ms]       ; bf r11, rx_runt }
+        { endin tmp3, res[p_rxd_ms]         ; ldw r11, sp[SP_PING_PONG] }
+        // Get final data (if there is any) and store words from last iteration of loop.
+        { in tmp1, res[p_rxd_ms]            ; stw tmp1, ptr[1] }
+        endin tmp3, res[p_rxd_ls]
+        { in tmp5, res[p_rxd_ls]            ; stw tmp5, ptr[0] }
+        
+        //endin ???, res[p_rxd_ls]
 
-        // Consume data from port         // Determine whether to do second IN
-        { in tmp5, res[p_rxd]             ; lss tmp4, tmp3, tmp4 }
+        // If endin says 0, we have got all the data we need
+        //bf tmp3, 
 
-        // Signal to ping-pong thread
-        { out res[r11], r11               ; bt tmp4, rx_one_word_endin }
+        // Consume data from port         // Determine whether to do second IN (tmp4 is 33. tmp3 is number of bits left in p_rxd_ms port. If number of bits left in port is less than 33, tmp4 is set to 1. otherwise 0.
+        // So because we now have two 32 bit buffered ports, it's possible we never need to do a "second" in and all the data will be in these buffers. It's the same total data as two "old" ins.
+        // Lets try this - if we ever see the endin return more than 32 we are in trouble.
+        //{ in tmp5, res[p_rxd]             ; lss tmp4, tmp3, tmp4 }
+        //{ in tmp1, res[p_rxd_ms]            ; lss tmp4, tmp3, tmp4 } // maybe branch to an error if number of bits left in port is > 32?
+        //{ in tmp5, res[p_rxd_ls]            ; nop }
 
+        // Need to signal to ping-pong thread quickly
+        // We must finish using all ports within 3 or so instructions after this signal as ping pong thread will start using them.
+        // Signal to ping-pong thread     // If no of bits left in ms port is < 17, branch to rx_one_word_endin otherwise carry on to rx_two_word_endin
+        //lss tmp4, tmp3, tmp4
+        { out res[r11], r11               ; nop }
+
+// Remember incomplete buffers will have the bits in the MS bits of the word. So we need to do a shift right before we do the zip.
+
+// In two word endin we have more than one word of data. so here we process the full word we know is good (second to last word).
+//rx_two_word_endin:
+
+       //                                // Restore the DV ID
+       { nop                             ; ldw r11, sp[SP_RX_DV] }
+       // Clear data from DV port        // 
+       { in r11, res[r11]                ; nop }
+       
+       // work out how far we need to shift right.
+       // This is 32 - endin (bits)
+       { nop                               ; ldc r11, 32           }
+       // tmp4 = 32 - (endin (bits))
+       { sub tmp4, r11, tmp3               ; nop                  }
+       { shr tmp1, tmp1, tmp4              ; shr tmp5, tmp5, tmp4 }
+        // ZIP two input words to get our two final data words LSB justifed in tmp1 (ms) and tmp5 (ls word). Always LSB first.
+        zip tmp1, tmp5, 2
+        // Number of bits is tmp3*2
+        // Number of bits in zipped word is double that of endin on port as two ports.
+        shl tmp3, tmp3, 1
+        // now decide how many bits we have left to process.
+        // make tmp4 be 17
+        ldc tmp4, 33
+        lss tmp4, tmp3, tmp4
+        // tmp4 true if no of bits left to process is < 33 (one word or less in total)
+        bt tmp4, rx_one_word_endin
+
+// So here we know we have a full word to process in tmp5
 rx_two_word_endin:
-        // Consume final bits             // Restore the DV ID
-        { in r11, res[p_rxd]              ; ldw tmp4, sp[SP_RX_DV] }
+        // CRC the second to last word
+        crc32_inc crc, tmp5, poly, ptr, 4
+        // and store
+        stw tmp5, ptr[1]
+        // Move the ms word to ls word for processing in final stage
+        mov tmp5, tmp1
+        // processed one word so subtract 32 from tmp3. r11 still 32
+        //ldc r11, 32
+        sub tmp3, tmp3, r11
 
-        // Clear data from DV port        // Store off first word of data
-        { in tmp4, res[tmp4]              ; stw tmp5, sp[SP_FIRST_WORD] }
-
-        //                                // Store off SPC to use
-        { mov tmp5, r11                   ; stw spc, sp[SP_SPC] }
-
-        // Use the SPC to determine whether the CRC still needs to be done
-        { ldc r11, 0x7                    ; ldw tmp4, sp[SP_SPC] }
-        { and tmp4, tmp4, r11             ; stw tmp2, sp[SP_SAVED_WORD13] }
-        { nop                             ; bf tmp4, rx_two_crc_done }
-
-rx_two_do_crc:
-        // Perform CRC for last word if required
-        crc32_inc crc, tmp1, poly, ptr, 4
-
-rx_two_crc_done:
-        // Move pointer for last word     // Store off last complete word
-        { ldc tmp4, 32                    ; stw tmp1, ptr[0] }
-
-        // Compute actual ENDIN bytes     // Restore full word from ENDIN
-        { sub tmp3, tmp3, tmp4            ; ldw tmp1, sp[SP_FIRST_WORD] }
-        crc32_inc crc, tmp1, poly, ptr, 4
-
-        { add ptr, ptr, 4                 ; stw tmp1, ptr[0] }
-        { nop                             ; bu rx_shared }
-
+// Here we know we have a full word or partial word to process in tmp5
 .align 16
 rx_one_word_endin:
-        //                                // Restore DV ID
-        { nop                             ; ldw tmp4, sp[SP_RX_DV]}
-
-        // Clear data from DV port        // Store off SPC to use
-        { in r11, res[tmp4]               ; stw spc, sp[SP_SPC] }
-
-        // Use the SPC to determine whether the CRC still needs to be done
-        { ldc r11, 0x7                    ; ldw tmp4, sp[SP_SPC] }
-        { and tmp4, tmp4, r11             ; stw tmp2, sp[SP_SAVED_WORD13] }
-        { nop                             ; bf tmp4, rx_one_crc_done }
-
-rx_one_do_crc:
-        // Perform CRC for last word if required
-        crc32_inc crc, tmp1, poly, ptr, 4
+        // If no bits left in buffer at all we're all done.
+        bf tmp3, rx_shared
 
 rx_one_crc_done:
         // Move pointer for last word     // Store off last complete word
-        { add ptr, ptr, 4                 ; stw tmp1, ptr[0] }
-
+        //{ add ptr, ptr, 4                 ; stw tmp1, ptr[0] }
+        { nop                       ; stw tmp5, ptr[2] }
 
 rx_shared:
-        // Compute number of bytes so far // Minimum valid frame bytes
+         // update pointer to "next" location in mem
+         add ptr, ptr, 8
+        // Compute number of bytes so far (including MII header (10 words = 40 bytes) 
+                                          // Minimum valid frame bytes
         { sub tmp2, ptr, base             ; ldw tmp4, sp[SP_VALID_LEN] }
 
-        // Compute byte count from bits   //
-        { shr r11, tmp3, 3                ; ldc tmp1, 32 }
+        // Compute endin byte count from endin bit count by div by 8.
+                                          //
+        { shr r11, tmp3, 3                ; nop }
 
-        // Compute byte count received    // Compute shift distance to align data
-        { add tmp2, tmp2, r11             ; sub r11, tmp1, tmp3 }
+        // Compute byte count received (bytes based on pointer plus bytes left in buffers
+                                          // Compute shift distance to align data: r11 = (32 - number of bits in buffer)
+        //{ add tmp2, tmp2, r11             ; sub r11, tmp1, tmp3 }
+        { add tmp2, tmp2, r11             ; nop }
 
-        // Align data word correctly      // Load mii_packet_t overhead
-        { shr tmp1, tmp5, r11             ; ldc tmp5, MII_PACKET_HEADER_BYTES }
-        crcn crc, tmp1, poly, tmp3
+        // Align data word correctly (tmp1 = tmp5 (final data word) >> r11)
+                                           // Load mii_packet_t overhead
+        //{ shr tmp1, tmp5, r11             ; ldc tmp5, MII_PACKET_HEADER_BYTES }
+        { nop                               ; ldc tmp1, MII_PACKET_HEADER_BYTES }
+        // Final crc based on LS (tmp3) bits of tmp5.
+        crcn crc, tmp5, poly, tmp3
+
+
+// ***JEG think ok below here if we can keep regs available
+
+
 
         // Discount mii_packet_t overhead
-        { sub tmp2, tmp2, tmp5            ; nop }
+        { sub tmp2, tmp2, tmp1            ; nop }
 
         // Compare length with minimum    // Offset of length/type field
         { lss tmp4, tmp2, tmp4            ; ldc tmp1, MII_PACKET_HEADER_WORDS + 3 }
@@ -1095,7 +441,9 @@ rx_test_length:
         { shl ptr, ptr, 2                 ; nop }
 
         // Check whether type/len is a length // Restore the missing word to tmp5
-        { lsu tmp3, tmp1, tmp5            ; ldw tmp5, sp[SP_SAVED_WORD13] }
+        //{ lsu tmp3, tmp1, tmp5            ; ldw tmp5, sp[SP_SAVED_WORD13] }
+                                              // Don't use saved word any more
+        { lsu tmp3, tmp1, tmp5            ; nop }
 
         // Check whether the length is invalid (less than the actual data)
         { lsu tmp3, tmp4, tmp1            ; bf tmp3, rx_test_max_len }
@@ -1113,12 +461,17 @@ rx_test_max_len:
         { add ptr, base, ptr              ; bt tmp3, rx_length_error }
 
 rx_crc_ok:
-        // CRC ok, send pointer           // Store size in word 0 or packet
-        { out res[chan], base             ; stw tmp2, base[0] }
+        // Get chan from stack
+        ldw r11, sp[SP_CHAN]
+
+        // CRC ok, send pointer           // Store size in word 0 of packet
+        { out res[r11], base             ; stw tmp2, base[0] }
 
         // Receive address of packet buffer (re-use current buffer on error)
                                           // Store off the missing word that was used for runt detection
-        { in base, res[chan]              ; stw tmp5, ptr[0] }
+        //{ in base, res[chan]              ; stw tmp5, ptr[0] }
+                                          // Don't use missing word any more
+        { in base, res[r11]              ; nop }
 
 rx_next:
         //                                // Restore the ping-pong channel ID
@@ -1127,8 +480,8 @@ rx_next:
         // Must be a 32-bit instruction for long branch
         bu rx_sof
 
-rx_error_too_long:
-        { clrsr XS1_SR_IEBLE_SET(0, 1)    ; bu rx_wait_idle }
+//rx_error_too_long:
+        //{ clrsr XS1_SR_IEBLE_SET(0, 1)    ; bu rx_wait_idle }
 
 .align 16
 rx_length_error:
@@ -1149,21 +502,29 @@ rx_error_crc:
         { nop                             ; stw tmp3, dp[mii_count_crc_error] }
         bu rx_sof
 
-.align 16
-rx_error:
-        // Clear the error so that it can fire again (tmp3 contains RX_ERR)
-        { in tmp2, res[tmp3]              ; bu rx_wait_idle }
+// Not using rx error any more
+//.align 16
+//rx_error:
+//        // Clear the error so that it can fire again (tmp3 contains RX_ERR)
+//        { in tmp2, res[tmp3]              ; bu rx_wait_idle }
 
-.align 16
-rx_wait_idle:
+//.align 16
+//rx_wait_idle:
+/*
         // Error in packet, wait for DV (tmp5) to be low // Restore the ping-pong channel
+        ldw tmp5, sp[SP_RX_DV]
         { in tmp2, res[tmp5]              ; ldw tmp1, sp[SP_PING_PONG] }
 
         // Signal to ping-pong thread that it can run
         { out res[tmp1], tmp1             ; bu rx_next }
 
-        // Clear the data port
-        { setc res[p_rxd], XS1_SETC_RUN_CLRBUF ; nop }
+        // Clear the data ports
+        { setc res[p_rxd_ms], XS1_SETC_RUN_CLRBUF ; nop }
+
+        ldw p_rxd_ls, sp[SP_RXD_LS]
+        
+        { setc res[p_rxd_ls], XS1_SETC_RUN_CLRBUF ; nop }
+*/
 
         .align 4
         .cc_bottom rgmii_rx_lld.function
@@ -1185,4 +546,3 @@ rx_wait_idle:
 rgmii_rx_lld:
         .cc_bottom rgmii_rx_lld.function
 #endif
-

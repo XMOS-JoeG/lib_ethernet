@@ -19,8 +19,8 @@ rgmii_ports_t rgmii_ports = on tile[1]: RGMII_PORTS_INITIALIZER;
     port     p_smi_mdc   = on tile[1]: XS1_PORT_1N;
 out port     p_eth_reset  = on tile[1]: XS1_PORT_4A; // Bit 3 is reset_n (active low), other bits unconnected.
 
-//static unsigned char ip_address[4] = {192, 168, 1, 178};
-static unsigned char ip_address[4] = {10, 0, 102, 182};
+static unsigned char ip_address[4] = {192, 168, 1, 178};
+//static unsigned char ip_address[4] = {10, 0, 102, 182};
 
 // An enum to manage the array of connections from the ethernet component
 // to its clients.
@@ -65,7 +65,7 @@ void vsc8541_phy_driver(client interface smi_if smi,
   p_eth_reset <: 0x0;
   delay_milliseconds(phy_reset_delay_ms);
   p_eth_reset <: 0x8; // Reset is on bit 3 of 4 bit port.
-  delay_milliseconds(15); // Datasheet says wait 15ms after release of reset before access.
+  delay_milliseconds(100); // Datasheet says wait 15ms after release of reset before access.
   
   #define VSC8541_PHY_ID 0x0007077 // Most significant 28 bits of PHY Identifier. This incorporates OUI and model number.
   

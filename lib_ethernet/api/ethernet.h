@@ -386,30 +386,33 @@ enum ethernet_enable_shaper_t {
     \endverbatim
 */
 typedef struct rgmii_ports_t {
-  in            port    p_rxclk;    /**< RX clock port */
-  in  buffered  port:1  p_rxer;     /**< RX error port */
-  in            port    p_rxdv;     /**< RX data valid port */
-  in  buffered  port:32 p_rxd_1000; /**< 1Gb RX data port */
-  out           port    p_txclk;    /**< TX clock port */
-  out           port    p_txer;     /**< TX error port */
-  out           port    p_txen;     /**< TX enable port */
+  in            port    p_rxc;      /**< RX clock port */
+  in            port    p_rx_ctl;   /**< RX ctrl port */
+  in  buffered  port:32 p_rxd_ms;   /**< RX ms data port */
+  in  buffered  port:32 p_rxd_ls;   /**< RX ls data port */
+  out           port    p_txc;      /**< TX clock port */
+  out           port    p_tx_ctl;   /**< TX ctrl port */
   out buffered  port:32 p_txd;      /**< TX data port */
   clock rxclk;                      /**< Clock used for receive timing */
-  clock txclk;                      /**< Clock used for transmit timing */
+  clock txclk_2x;                   /**< Double speed clock used for TX - 250MHz */
+  clock txclk_1x;                   /**< Single speed clock used for TX - 125MHz */
 } rgmii_ports_t;
 
 #define RGMII_PORTS_INITIALIZER { \
-  XS1_PORT_1K, \
-  XS1_PORT_1I, \
-  XS1_PORT_1J, \
-  XS1_PORT_8C, \
-  XS1_PORT_1F, \
-  XS1_PORT_1B, \
-  XS1_PORT_1G, \
-  XS1_PORT_8B, \
+  XS1_PORT_1K,  \
+  XS1_PORT_1J,  \
+  XS1_PORT_4F,  \
+  XS1_PORT_4E,  \
+  XS1_PORT_1F,  \
+  XS1_PORT_1G,  \
+  XS1_PORT_4C,  \
   XS1_CLKBLK_1, \
-  XS1_CLKBLK_2 \
+  XS1_CLKBLK_2, \
+  XS1_CLKBLK_3  \
 }
+
+
+
 
 /** 10/100/1000 Mb/s Ethernet MAC component to connect to an RGMII interface.
  *
