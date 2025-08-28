@@ -28,7 +28,8 @@ void rgmii_rx_lld(streaming chanend c,
 
 void rgmii_tx_lld(streaming chanend c,
                   out buffered port:32 p_txd,
-                  streaming chanend c_speed_change);
+                  streaming chanend c_speed_change,
+                  out buffered port:1 p_txdummy);
 
 #endif
 

@@ -183,6 +183,10 @@ start_gigabit_rx:
         //setc res[tmp4], XS1_SETC_IE_MODE_INTERRUPT // JEG leave the port in EVENT mode.
         //eeu res[tmp4] moved this to later after rx_dv has gone high
 
+        // Setup the RX data event vector - event is buffers being full in p_rxd_ms
+        ldap r11, rx_data_loop
+        setv res[p_rxd_ms], r11
+
         // Initially only one of the ping-pong threads must setup the ports and start
         bu rx_dont_wait
 
@@ -230,18 +234,19 @@ rx_data:
         // Input word from ms port          // Don't store SOF (would overwrite timestamp)
         { in tmp1, res[p_rxd_ms]            ; add ptr, base, ptr }
         // Input word from ls port          // Load PC relative address for the rx_data_loop into r11)
-        { in tmp5, res[p_rxd_ls]            ; ldap r11, rx_data_loop }
+        //{ in tmp5, res[p_rxd_ls]            ; ldap r11, rx_data_loop }
+                                            // Number of bits required for two INs after ENDIN
+        { in tmp5, res[p_rxd_ls]            ; ldc tmp4, 17 }
         // ZIP two input words to form 64 bit result in same regs
         zip tmp1, tmp5, 2
-        // Init crc as ~tmp5 (first word)   // Number of bits required for two INs after ENDIN
-        { not crc, tmp5                     ; ldc tmp4, 17 }
+        // Init crc as ~tmp5 (first word)   // Enable events for MS data port
+        { not crc, tmp5                     ; eeu res[p_rxd_ms]}
         // CRC only on second word
         crc32 crc, tmp1, poly
-        setv res[p_rxd_ms], r11
-        // Enable events for MS data port
-        eeu res[p_rxd_ms]
+        //setv res[p_rxd_ms], r11
         waiteu
-        
+
+.align 16
 rx_data_loop:
         // Input word from ms port          // Store previous (zipped) ms word to mem
         { in tmp1, res[p_rxd_ms]            ; stw tmp1, ptr[1] }

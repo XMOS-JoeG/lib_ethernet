@@ -24,8 +24,9 @@
 #define SP_CHAN_ID        1
 #define SP_MOD3_TABLE     2
 #define SP_DP_VALUE       3
-#define SP_REGISTER_SAVE  4
-#define SP_NUM_WORDS     11+1 // Extend to even number to conform to XS2 ABI
+#define SP_DUMMY_ID       4
+#define SP_REGISTER_SAVE  5
+#define SP_NUM_WORDS     13+1 // Extend to even number to conform to XS2 ABI
 
 #define MAX_PACKET_WORDS (ETHERNET_MAX_PACKET_SIZE/4)
 
@@ -96,6 +97,9 @@ tx_speed_change_handler:
 start_gigabit_tx:
         // Save off the DP which will be used later
         stw dp, sp[SP_DP_VALUE]
+        
+        // Store the dummy port ID on the stack
+        stw r3, sp[SP_DUMMY_ID]
 
         // Put core in fast mode and ensure that the core remains in dual
         // issue when an interrupt is taken
@@ -108,10 +112,11 @@ start_gigabit_tx:
         ldap r11, crc_poly
         ldw poly, r11[0]
 
+        // Think this was left in here in error, copy pasta from rx
         // Setup the RXD data pattern (SOF)
-        ldap r11, sof_value
-        ldw r11, r11[0]
-        setd res[p_txd], r11
+        //ldap r11, sof_value
+        //ldw r11, r11[0]
+        //setd res[p_txd], r11
 
         // Load data_values pointer into DP
         ldap r11, data_values
@@ -123,8 +128,12 @@ start_gigabit_tx:
         ldap r11, mod3_table
         stw r11, sp[SP_MOD3_TABLE]
 
+#undef crc
+#define time0 r4
+
 .align 16
 tx_sof:
+        ldw r3, sp[SP_DUMMY_ID]
         // Get address of packet buffer   // Timestamp the start of packet
         { in base, res[tmp6]              ; gettime tmp5 }
 
@@ -136,12 +145,25 @@ tx_sof:
 
         // Convert bytes to bits          // Get word count
         { shl tmp5, tmp6, 3               ; shr tmp2, tmp4, 2 }
+        
+        // IN on dummy port, discard           // Make a mask of 0x1 to use later to set LSB.
+        { in time0, res[r3]                    ; mkmsk tmp1, 0x1 }
+        // Get the port time of the dummy in (this mirrors the port time of data out port).
+        getts time0, res[r3]
+        // Add 44 to the port time. 32 bit instruction. This must be more than how much the port time will increment at 250MHz (4ns) before the first out. 
+        // first out must wait for at least a few port times before outputting
+        ldaw time0, time0[0xB]
+        // Set the LSB to ensure the port time is odd
+        or time0, time0, tmp1
 
         // Load size of mii_packet_t header // Load the offset for the start sequence
         { ldc ptr, MII_PACKET_HEADER_BYTES; ld8u tmp6, r11[tmp2] }
 
-        // Skip mii_packet_t header
-        { add ptr, base, ptr              ; nop }
+        // Skip mii_packet_t header       // Set port time to output first word
+        { add ptr, base, ptr              ; setpt res[p_txd], time0 }
+
+#undef time0
+#define crc r4
 
         // Two insts per data word        // Load in the max packet size branch distance
         { shl tmp4, tmp2, 1               ; ldw tmp1, dp[2] }

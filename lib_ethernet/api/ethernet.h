@@ -393,6 +393,7 @@ typedef struct rgmii_ports_t {
   out           port    p_txc;      /**< TX clock port */
   out           port    p_tx_ctl;   /**< TX ctrl port */
   out buffered  port:32 p_txd;      /**< TX data port */
+  out buffered  port:1  p_txdummy;  /**< TX dummy port for aligning data with clock phase */
   clock rxclk;                      /**< Clock used for receive timing */
   clock txclk_2x;                   /**< Double speed clock used for TX - 250MHz */
   clock txclk_1x;                   /**< Single speed clock used for TX - 125MHz */
@@ -406,6 +407,7 @@ typedef struct rgmii_ports_t {
   XS1_PORT_1F,  \
   XS1_PORT_1G,  \
   XS1_PORT_4C,  \
+  XS1_PORT_1A,  \
   XS1_CLKBLK_1, \
   XS1_CLKBLK_2, \
   XS1_CLKBLK_3  \

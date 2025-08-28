@@ -82,14 +82,37 @@ void vsc8541_phy_driver(client interface smi_if smi,
 
   #define EXTENDED_REGISTER_PAGE_ADDR  31
   #define VSC8541_WOL_AND_MAC_IF_CTRL_ADDR 27
+  #define VSC8541_RGMII_CTRL_ADDR 20
+  
   #define VSC8541_PAD_EDGE_RATE 2 // Setting +2 works well with 33R series terminator and 50 ohm trace.
+  
+  // RGMII clock delay options
+  // 0: 0.2 ns delay.
+  // 1: 0.8 ns delay.
+  // 2: 1.1 ns delay.
+  // 3: 1.7 ns delay.
+  // 4: 2.0 ns delay.
+  // 5: 2.3 ns delay.
+  // 6: 2.6 ns delay.
+  // 7: 3.4 ns delay.
+  #define VSC8541_RGMII_RX_CLK_DELAY 1 // 1 is 0.8ns
+  #define VSC8541_RGMII_TX_CLK_DELAY 4 // 4 is 2ns delay
   // Set up any relevant registers here - check procedure in datasheet. Things like MAC pad edge rate etc.
 
   // Read modify Write Wake-on-LAN and MAC Interface control register to set the pad edge rate.
   smi.write_reg(phy_address, EXTENDED_REGISTER_PAGE_ADDR, 2); // Register addresses 16-30 now access extended register space 2.
+  
   reg_read_val = smi.read_reg(phy_address, VSC8541_WOL_AND_MAC_IF_CTRL_ADDR);
   reg_write_val = (reg_read_val & 0xFF1F) | (VSC8541_PAD_EDGE_RATE << 5); // Set MAC interface pad edge rate
   smi.write_reg(phy_address, VSC8541_WOL_AND_MAC_IF_CTRL_ADDR, reg_write_val);
+  
+  // Read modify Write RGMII CTRL register to set TX and RX clock delays
+  reg_read_val = smi.read_reg(phy_address, VSC8541_RGMII_CTRL_ADDR);
+  //debug_printf("reg_read_val 0x%08X\n", reg_read_val);
+  reg_write_val = (reg_read_val & 0xFF88) | (VSC8541_RGMII_RX_CLK_DELAY << 4) | (VSC8541_RGMII_TX_CLK_DELAY << 0); // Set RGMII clock delays
+  //debug_printf("reg_write_val 0x%08X\n", reg_write_val);
+  smi.write_reg(phy_address, VSC8541_RGMII_CTRL_ADDR, reg_write_val);
+  
   smi.write_reg(phy_address, EXTENDED_REGISTER_PAGE_ADDR, 0); // Main register access restored.
 
   smi_configure(smi, phy_address, LINK_1000_MBPS_FULL_DUPLEX, SMI_ENABLE_AUTONEG);

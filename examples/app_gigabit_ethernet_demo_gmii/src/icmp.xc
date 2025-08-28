@@ -275,6 +275,11 @@ void icmp_server(client ethernet_cfg_if cfg,
       unsigned char txbuf[ETHERNET_MAX_PACKET_SIZE];
       ethernet_packet_info_t packet_info;
       rx.get_packet(packet_info, rxbuf, ETHERNET_MAX_PACKET_SIZE);
+      
+/*       for(int i=0; i<packet_info.len; i++)
+      {
+          debug_printf("rxbuf[%2d] = 0x%08X\n", i, rxbuf[i]);
+      } */
 
       if (packet_info.type != ETH_DATA)
         continue;
@@ -282,6 +287,10 @@ void icmp_server(client ethernet_cfg_if cfg,
       if (is_valid_arp_packet(rxbuf, packet_info.len, ip_address))
       {
         int len = build_arp_response(rxbuf, txbuf, mac_address, ip_address);
+/*         for(int i=0; i<len; i++)
+        {
+          debug_printf("txbuf[%2d] = 0x%08X\n", i, txbuf[i]);
+        } */
         tx.send_packet(txbuf, len, ETHERNET_ALL_INTERFACES);
         debug_printf("ARP response sent\n");
       }
