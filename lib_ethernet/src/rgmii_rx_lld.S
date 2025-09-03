@@ -4,10 +4,8 @@
 #include "mii_buffering_defines.h"
 
 // Register allocation. Don't re-map r11 as some instructions must write to it
-//#define chan      r0
 #define p_rxd_ls  r0
 #define p_rxd_ms  r1
-// need to add a p_rxd_ls register ... hopefully we can save somewhere else
 #define tmp5      r2
 #define tmp4      r3
 #define base      r4
@@ -17,26 +15,21 @@
 #define tmp1      r8
 #define tmp2      r9
 #define tmp3      r10
-//#define p_rxd_ls  r10
 
 // Stack offsets - NOTE: SPC offset is fixed
 #define SP_SPC              1
 #define SP_PING_PONG        2
 #define SP_VALID_LEN        3
-#define SP_FIRST_WORD       4
-#define SP_SAVED_WORD13     5
-#define SP_REGISTER_SAVE_0  6
-#define SP_REGISTER_SAVE_1  7
-#define SP_REGISTER_SAVE_2  8
-#define SP_REGISTER_SAVE_3  9
-#define SP_REGISTER_SAVE_4 10
-#define SP_REGISTER_SAVE_5 11
-#define SP_REGISTER_SAVE_6 12
-#define SP_CHAN            13 // Added JEG
-//#define SP_NUM_WORDS       13+1 // Extend to even number to conform to XS2 ABI
-#define SP_NUM_WORDS       14 // JEG to keep as even number
+#define SP_CHAN             4
+#define SP_REGISTER_SAVE_0  5
+#define SP_REGISTER_SAVE_1  6
+#define SP_REGISTER_SAVE_2  7
+#define SP_REGISTER_SAVE_3  8
+#define SP_REGISTER_SAVE_4  9
+#define SP_REGISTER_SAVE_5  10
+#define SP_REGISTER_SAVE_6  11
+#define SP_NUM_WORDS        11+1 // Extend to even number to conform to XS2 ABI
 
-//#define SP_RX_ERR        (SP_NUM_WORDS + 3) not using RX_ERROR
 #define SP_RXD_MS        (SP_NUM_WORDS + 1)
 #define SP_RXD_LS        (SP_NUM_WORDS + 2)
 #define SP_RX_DV         (SP_NUM_WORDS + 3)
@@ -149,7 +142,7 @@ start_gigabit_rx:
 
         // Receive address of packet buffer // Get RXD_MS off the stack
         { in base, res[r0]              ; ldw p_rxd_ms, sp[SP_RXD_MS] }
-        // store channel onto stack JEG
+        // Store channel onto stack
         stw r0, sp[SP_CHAN]
 
         ldw p_rxd_ls, sp[SP_RXD_LS]
@@ -166,19 +159,10 @@ start_gigabit_rx:
         ldw r11, r11[0]
         setd res[p_rxd_ms], r11
 
-        // Setup the RXER port to detect the port going high
-        // { ldc r11, 1                      ; ldw tmp3, sp[SP_RX_ERR] }
-        // setd res[tmp3], r11
-        // ldap r11, rx_error
-        // setv res[tmp3], r11
-        // setc res[tmp3], XS1_SETC_IE_MODE_INTERRUPT
-        // eeu res[tmp3]
-        // setc res[tmp3], XS1_SETC_COND_EQ
-
         // Setup the RXDV data
         { ldc r11, 0                      ; ldw tmp4, sp[SP_RX_DV] }
         setd res[tmp4], r11
-        ldap r11, rxdv_low_isr // Change to the ISR
+        ldap r11, rxdv_low_isr
         setv res[tmp4], r11
         setc res[tmp4], XS1_SETC_IE_MODE_INTERRUPT
         eeu res[tmp4]
@@ -206,32 +190,26 @@ rx_sof:
 .skip 0
 rx_aligned:
         // Wait for ownership in the ping-pong (assume tmp1 contains the channel ID)
-        // and load RX_ERR into tmp3 so that it is available for the error handler code
-        //{ in tmp1, res[tmp1]              ; ldw tmp3, sp[SP_RX_ERR] }
         in tmp1, res[tmp1]
 
 rx_dont_wait:
-        // Take ownership of the error port // Offset of data within the mii_packet_t structure
-        //{ setc res[tmp3], XS1_SETC_COND_EQ ; ldc ptr, MII_PACKET_HEADER_BYTES }
+        // Offset of data within the mii_packet_t structure
         ldc ptr, MII_PACKET_HEADER_BYTES
 
         // Setup the condition on the data port for the SOF
-        // Load RX_DV into tmp5 so that it is available for the error handler code
+                                                // Load RX_DV resource ID into tmp5 so that we can set condition
         { setc res[p_rxd_ms], XS1_SETC_COND_EQ ; ldw tmp5, sp[SP_RX_DV] }
 
         // Setup the condition on the data valid port for the EOF
-                                           // Indicate that a minimum sized frame has not arrived yet
+                                           // Initialise r11 to 0 (used for data loop)
         { setc res[tmp5], XS1_SETC_COND_EQ ; ldc r11, 0 }
 
-        // Wait for the SOF               // Read the timestamp
+        // Wait for the SOF                // Read the timestamp
         { in tmp1, res[p_rxd_ms]           ; gettime tmp2 }
         // Get ls word and discard         // Store off the timestamp
         { in tmp1, res[p_rxd_ls]           ; stw tmp2, base[1] }
-    
-        //                                // Store off the timestamp
-         { setsr XS1_SR_IEBLE_SET(0, 1)    ; nop } // JEG old interrupt
-        // Enable events for data valid port (data valid going low). Data valid must be high already here to have received the SOF.
-        //eeu res[tmp5]
+        // Enable DV going low interrupt
+        { setsr XS1_SR_IEBLE_SET(0, 1)     ; nop } 
 
 rx_data:
         // Input word from ms port          // Init the pointer to the base address provided
