@@ -178,22 +178,32 @@ start_gigabit_rx:
         // Setup the RXDV data
         { ldc r11, 0                      ; ldw tmp4, sp[SP_RX_DV] }
         setd res[tmp4], r11
-        ldap r11, rx_done
+        ldap r11, rxdv_low_isr // Change to the ISR
         setv res[tmp4], r11
-        //setc res[tmp4], XS1_SETC_IE_MODE_INTERRUPT // JEG leave the port in EVENT mode.
-        //eeu res[tmp4] moved this to later after rx_dv has gone high
-
-        // Setup the RX data event vector - event is buffers being full in p_rxd_ms
-        ldap r11, rx_data_loop
-        setv res[p_rxd_ms], r11
+        setc res[tmp4], XS1_SETC_IE_MODE_INTERRUPT
+        eeu res[tmp4]
 
         // Initially only one of the ping-pong threads must setup the ports and start
         bu rx_dont_wait
+
+.align 16
+rxdv_low_isr:
+        // Clear data from DV port          // Store the saved PC on the stack
+        { in tmp2, res[tmp2]                ; stw spc, sp[SP_SPC] }
+        // Load tmp2 with the saved PC      // Load r11 with the address of rx_data_loop
+        { ldw tmp2, sp[SP_SPC]              ; ldap r11, rx_data_loop }
+        // See if the saved PC is equal to the address of rx_data_loop (i.e. we were waiting for data).
+        eq r11, r11, tmp2
+        // If so, branch to rx_done         // Load r11 with 1 to end rx_data_loop
+        { bt r11, rx_done                   ; ldc r11, 1 }
+        // Else go back to where we were in rx_data_loop, because r11 is now not zero we will fallthrough to rx_done after
+        bau tmp2
 
 rx_sof:
         //{ setsr XS1_SR_EEBLE_SET(0, 1)    ; bu rx_aligned }
 
 .align 16
+.skip 0
 rx_aligned:
         // Wait for ownership in the ping-pong (assume tmp1 contains the channel ID)
         // and load RX_ERR into tmp3 so that it is available for the error handler code
@@ -219,34 +229,23 @@ rx_dont_wait:
         { in tmp1, res[p_rxd_ls]           ; stw tmp2, base[1] }
     
         //                                // Store off the timestamp
-       // { setsr XS1_SR_IEBLE_SET(0, 1)    ; stw tmp2, base[1] } // JEG old interrupt
+         { setsr XS1_SR_IEBLE_SET(0, 1)    ; nop } // JEG old interrupt
         // Enable events for data valid port (data valid going low). Data valid must be high already here to have received the SOF.
-        eeu res[tmp5]
+        //eeu res[tmp5]
 
 rx_data:
-        //                                // Don't store SOF (would overwrite timestamp)
-        //{ in tmp1, res[p_rxd]             ; add ptr, base, ptr }
-
-        //                                // Number of bits required for two INs after ENDIN
-        //{ not crc, tmp1                   ; ldc tmp4, 33 }
-
-
-        // Input word from ms port          // Don't store SOF (would overwrite timestamp)
+        // Input word from ms port          // Init the pointer to the base address provided
         { in tmp1, res[p_rxd_ms]            ; add ptr, base, ptr }
-        // Input word from ls port          // Load PC relative address for the rx_data_loop into r11)
-        //{ in tmp5, res[p_rxd_ls]            ; ldap r11, rx_data_loop }
-                                            // Number of bits required for two INs after ENDIN
+        // Input word from ls port          // Number of bits required for two INs after ENDIN
         { in tmp5, res[p_rxd_ls]            ; ldc tmp4, 17 }
         // ZIP two input words to form 64 bit result in same regs
         zip tmp1, tmp5, 2
-        // Init crc as ~tmp5 (first word)   // Enable events for MS data port
-        { not crc, tmp5                     ; eeu res[p_rxd_ms]}
+        // Init crc as ~tmp5 (first word)   // load resource ID of rx_dv into tmp2 ready for isr
+        { not crc, tmp5                     ; ldw tmp2, sp[SP_RX_DV] }
         // CRC only on second word
         crc32 crc, tmp1, poly
-        //setv res[p_rxd_ms], r11
-        waiteu
 
-.align 16
+//.align 16
 rx_data_loop:
         // Input word from ms port          // Store previous (zipped) ms word to mem
         { in tmp1, res[p_rxd_ms]            ; stw tmp1, ptr[1] }
@@ -258,101 +257,35 @@ rx_data_loop:
         crc32_inc crc, tmp5, poly, ptr, 8
         // CRC only
         crc32  crc, tmp1, poly
-        waiteu
+        // Loop if r11 is 0 (default)
+        bf r11, rx_data_loop
 
-//*** FROM HERE CHANGE tmp3 if needed remember we're now using it for p_rxd_ls ***
-
-
-// Take this out for now but if we want a runt (short) packet check we can just look at ptr - base < 60?
 //.align 16
-//rx_runt:
-//        // Clear buffers in data ports            // Restore the DV ID
-//        { setc res[p_rxd_ms], XS1_SETC_RUN_CLRBUF ; ldw tmp4, sp[SP_RX_DV] }
-//        setc res[p_rxd_ls], XS1_SETC_RUN_CLRBUF
-//
-//        // Clear data from the DV port
-//        //{ in r11, res[tmp4]               ; ldw tmp3, sp[SP_RX_ERR] }
-//        in r11, res[tmp4]
-//
-//        // Runt received, just start next frame
-//        bu rx_dont_wait
-
-//*** FROM HERE CHANGE tmp3 if needed remember we're now using it for p_rxd_ls ***
-//maybe use tmp1 instead?
-//By the time we have interrupted for dv detected low the ports have already stopped getting data but we may have not collected it yet.
-//We should have complete (whole) bytes so both port buffers will have same amount of data in.
-
-//** initially assume we have equal amount of data in ms and ls port buffers ** this may not be case if in of p_rxd_ms completes before interrupt ... then we'd need to do separate endins. 
-//** well, we can say, do an endin on ls port and if different then we know we need to do the in?
-
-//** remember we still have to store off the words from last zip ***
-
-// I think all we can do is:
-// 1.) Store all data we can from ports - endin and port buffers. (tmp1 and tmp5 may/will still have data in also from the last time so we need to put
-// 2.) signal to ping pong thread it can now use ports
-// 3.) post process all the data to sort it all out. We now have enough time. (time for a whole packet to run in other thread which could be short so not that long).
-
-
-// New method, endin. If 0 we are done , could also be 4, 8, 12, 16 etc. One extra byte would be 4, two 8, three 12, four 16, five 20, six 24, seven 28, don't think 32 is possible but if so 8 extra bytes.
-// If endin is not zero we need to do INs from both MS and LS and do zip as normal then work on that 64 bit result.
-
-
-.align 16
 rx_done:
-        // store off the words from last loop (check tmp1 and tmp5 are right way round)
-        //std tmp1, tmp5, ptr[0]
-        // Release the last bytes in port // Check if we received more than minimum packet length
-                                          // r11 is init to 0 and only set (to ping pong channel res ID) when past min number of INs
-        // use tmp1 for now but will have to change it has data in it we haven't stored yet! - lets see what it is.
-        //{ endin tmp3, res[p_rxd_ms]       ; bf r11, rx_runt }
+        // Release the last bytes in ms port// Load r11 with the ping pong channel res ID
         { endin tmp3, res[p_rxd_ms]         ; ldw r11, sp[SP_PING_PONG] }
         // Get final data (if there is any) and store words from last iteration of loop.
         { in tmp1, res[p_rxd_ms]            ; stw tmp1, ptr[1] }
+        // Release the last bytes in ls port
         endin tmp3, res[p_rxd_ls]
         { in tmp5, res[p_rxd_ls]            ; stw tmp5, ptr[0] }
-        
-        //endin ???, res[p_rxd_ls]
-
-        // If endin says 0, we have got all the data we need
-        //bf tmp3, 
-
-        // Consume data from port         // Determine whether to do second IN (tmp4 is 33. tmp3 is number of bits left in p_rxd_ms port. If number of bits left in port is less than 33, tmp4 is set to 1. otherwise 0.
-        // So because we now have two 32 bit buffered ports, it's possible we never need to do a "second" in and all the data will be in these buffers. It's the same total data as two "old" ins.
-        // Lets try this - if we ever see the endin return more than 32 we are in trouble.
-        //{ in tmp5, res[p_rxd]             ; lss tmp4, tmp3, tmp4 }
-        //{ in tmp1, res[p_rxd_ms]            ; lss tmp4, tmp3, tmp4 } // maybe branch to an error if number of bits left in port is > 32?
-        //{ in tmp5, res[p_rxd_ls]            ; nop }
-
-        // Need to signal to ping-pong thread quickly
-        // We must finish using all ports within 3 or so instructions after this signal as ping pong thread will start using them.
-        // Signal to ping-pong thread     // If no of bits left in ms port is < 17, branch to rx_one_word_endin otherwise carry on to rx_two_word_endin
-        //lss tmp4, tmp3, tmp4
-        { out res[r11], r11               ; nop }
-
-// Remember incomplete buffers will have the bits in the MS bits of the word. So we need to do a shift right before we do the zip.
+        // Need to signal to ping-pong thread quickly   // Load r11 with 32 for shift calculation
+        { out res[r11], r11               ; ldc r11, 32 }
 
 // In two word endin we have more than one word of data. so here we process the full word we know is good (second to last word).
 //rx_two_word_endin:
 
-       //                                // Restore the DV ID
-       { nop                             ; ldw r11, sp[SP_RX_DV] }
-       // Clear data from DV port        // 
-       { in r11, res[r11]                ; nop }
-       
-       // work out how far we need to shift right.
-       // This is 32 - endin (bits)
-       { nop                               ; ldc r11, 32           }
-       // tmp4 = 32 - (endin (bits))
-       { sub tmp4, r11, tmp3               ; nop                  }
-       { shr tmp1, tmp1, tmp4              ; shr tmp5, tmp5, tmp4 }
+        // Remember incomplete buffers will have the bits in the MS bits of the word. So we need to do a shift right before we do the zip.
+        // Work out how far we need to shift right.
+        // This is 32 - endin (bits)
+        { sub tmp4, r11, tmp3               ; nop }
+        { shr tmp1, tmp1, tmp4              ; shr tmp5, tmp5, tmp4 }
         // ZIP two input words to get our two final data words LSB justifed in tmp1 (ms) and tmp5 (ls word). Always LSB first.
         zip tmp1, tmp5, 2
         // Number of bits is tmp3*2
         // Number of bits in zipped word is double that of endin on port as two ports.
-        shl tmp3, tmp3, 1
-        // now decide how many bits we have left to process.
-        // make tmp4 be 17
-        ldc tmp4, 33
+        { shl tmp3, tmp3, 1                 ; ldc tmp4, 33 }
+        // Decide how many bits we have left to process.
         lss tmp4, tmp3, tmp4
         // tmp4 true if no of bits left to process is < 33 (one word or less in total)
         bt tmp4, rx_one_word_endin
@@ -366,7 +299,6 @@ rx_two_word_endin:
         // Move the ms word to ls word for processing in final stage
         mov tmp5, tmp1
         // processed one word so subtract 32 from tmp3. r11 still 32
-        //ldc r11, 32
         sub tmp3, tmp3, r11
 
 // Here we know we have a full word or partial word to process in tmp5
@@ -388,25 +320,14 @@ rx_shared:
         { sub tmp2, ptr, base             ; ldw tmp4, sp[SP_VALID_LEN] }
 
         // Compute endin byte count from endin bit count by div by 8.
-                                          //
         { shr r11, tmp3, 3                ; nop }
 
         // Compute byte count received (bytes based on pointer plus bytes left in buffers
-                                          // Compute shift distance to align data: r11 = (32 - number of bits in buffer)
-        //{ add tmp2, tmp2, r11             ; sub r11, tmp1, tmp3 }
         { add tmp2, tmp2, r11             ; nop }
-
-        // Align data word correctly (tmp1 = tmp5 (final data word) >> r11)
                                            // Load mii_packet_t overhead
-        //{ shr tmp1, tmp5, r11             ; ldc tmp5, MII_PACKET_HEADER_BYTES }
         { nop                               ; ldc tmp1, MII_PACKET_HEADER_BYTES }
         // Final crc based on LS (tmp3) bits of tmp5.
         crcn crc, tmp5, poly, tmp3
-
-
-// ***JEG think ok below here if we can keep regs available
-
-
 
         // Discount mii_packet_t overhead
         { sub tmp2, tmp2, tmp1            ; nop }
@@ -473,9 +394,6 @@ rx_crc_ok:
         { out res[r11], base             ; stw tmp2, base[0] }
 
         // Receive address of packet buffer (re-use current buffer on error)
-                                          // Store off the missing word that was used for runt detection
-        //{ in base, res[chan]              ; stw tmp5, ptr[0] }
-                                          // Don't use missing word any more
         { in base, res[r11]              ; nop }
 
 rx_next:

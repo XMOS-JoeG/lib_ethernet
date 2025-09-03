@@ -84,7 +84,7 @@ void vsc8541_phy_driver(client interface smi_if smi,
   #define VSC8541_WOL_AND_MAC_IF_CTRL_ADDR 27
   #define VSC8541_RGMII_CTRL_ADDR 20
   
-  #define VSC8541_PAD_EDGE_RATE 2 // Setting +2 works well with 33R series terminator and 50 ohm trace.
+  #define VSC8541_PAD_EDGE_RATE 4 // Setting +2 works well with 33R series terminator and 50 ohm trace.
   
   // RGMII clock delay options
   // 0: 0.2 ns delay.
@@ -95,8 +95,8 @@ void vsc8541_phy_driver(client interface smi_if smi,
   // 5: 2.3 ns delay.
   // 6: 2.6 ns delay.
   // 7: 3.4 ns delay.
-  #define VSC8541_RGMII_RX_CLK_DELAY 1 // 1 is 0.8ns
-  #define VSC8541_RGMII_TX_CLK_DELAY 4 // 4 is 2ns delay
+  #define VSC8541_RGMII_RX_CLK_DELAY 2
+  #define VSC8541_RGMII_TX_CLK_DELAY 4
   // Set up any relevant registers here - check procedure in datasheet. Things like MAC pad edge rate etc.
 
   // Read modify Write Wake-on-LAN and MAC Interface control register to set the pad edge rate.

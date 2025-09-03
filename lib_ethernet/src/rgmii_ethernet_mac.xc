@@ -58,15 +58,6 @@ void rgmii_configure_ports(in port p_rxc, in port p_rx_ctl, in buffered port:32 
     configure_out_port(p_txdummy, txclk_2x, 0);
     //configure_out_port(p_dummy_1x, txclk_1x, 0);
     
-    // Init TX_CTL
-    //port_enable(p_tx_ctl);
-    //port_set_out_ready(p_tx_ctl, p_txd);
-
-    // Init TXC
-    //port_enable(p_txc);
-    //port_set_clock(p_txc, clock_tx_1x);
-    //port_set_out_clock(p_txc);
-    
     configure_port_clock_output(p_txc, txclk_1x);
     
     //stop_clock(txclk_2x);
@@ -82,7 +73,7 @@ void rgmii_configure_ports(in port p_rxc, in port p_rx_ctl, in buffered port:32 
                   :: "r" (txclk_1x), "r" (txclk_2x));
     
     // Set sw ref clock to 250MHz from 750MHz PLL clock
-    write_node_config_reg(tile[0], XS1_SSWITCH_REF_CLK_DIVIDER_NUM, 3); // Set to 3 if using 1Ghz core clock for testing!!!!!!!!!! (1000/(3+1) = 250) Set to 2 for 750 core clock
+    write_node_config_reg(tile[0], XS1_SSWITCH_REF_CLK_DIVIDER_NUM, 2); // Set to 3 if using 1Ghz core clock for testing!!!!!!!!!! (1000/(3+1) = 250) Set to 2 for 750 core clock
     
     // Is a possible alternative to stop both clocks, stop the sw_ref_clk using the divider, start both clocks then start the sw_ref clk using the divider?
     // or, set sw_ref_clk to very slow, 10MHz or so. Stop both clocks, then restart both clocks then up sw_ref_clk speed.
@@ -109,9 +100,10 @@ void rgmii_configure_ports(in port p_rxc, in port p_rx_ctl, in buffered port:32 
     // clock in on neg edge
     set_port_sample_delay(p_rxd_ms);
     
-    //set_pad_delay(p_rxd_ms, 0);
-    //set_pad_delay(p_rxd_ls, 0);
-    //set_pad_delay(p_rx_ctl, 0);
+    // Delay data and ctrl by one core clock cycle so they stay aligned with clock as it gets delayed one clock by the clock block.
+    set_pad_delay(p_rxd_ms, 1);
+    set_pad_delay(p_rxd_ls, 1);
+    set_pad_delay(p_rx_ctl, 1);
 
     
     // Init rX_CTL
