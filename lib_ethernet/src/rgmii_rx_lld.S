@@ -21,14 +21,15 @@
 #define SP_PING_PONG        2
 #define SP_VALID_LEN        3
 #define SP_CHAN             4
-#define SP_REGISTER_SAVE_0  5
-#define SP_REGISTER_SAVE_1  6
-#define SP_REGISTER_SAVE_2  7
-#define SP_REGISTER_SAVE_3  8
-#define SP_REGISTER_SAVE_4  9
-#define SP_REGISTER_SAVE_5  10
-#define SP_REGISTER_SAVE_6  11
-#define SP_NUM_WORDS        11+1 // Extend to even number to conform to XS2 ABI
+#define SP_MAX_NUM_BYTES    5
+#define SP_REGISTER_SAVE_0  6
+#define SP_REGISTER_SAVE_1  7
+#define SP_REGISTER_SAVE_2  8
+#define SP_REGISTER_SAVE_3  9
+#define SP_REGISTER_SAVE_4  10
+#define SP_REGISTER_SAVE_5  11
+#define SP_REGISTER_SAVE_6  12
+#define SP_NUM_WORDS        12 // Must be even number to conform to XS2 ABI
 
 #define SP_RXD_MS        (SP_NUM_WORDS + 1)
 #define SP_RXD_LS        (SP_NUM_WORDS + 2)
@@ -134,14 +135,14 @@ start_gigabit_rx:
         setsr XS1_SR_FAST_SET(XS1_SR_KEDI_SET(0, 1), 1)
 
         // Save off the ping pong channel
-        { stw r1, sp[SP_PING_PONG]        ; mov tmp1, r1 }
+        { stw r1, sp[SP_PING_PONG]          ; mov tmp1, r1 }
 
         // Setup the CRC polynomial
         ldap r11, crc_poly
         ldw poly, r11[0]
 
         // Receive address of packet buffer // Get RXD_MS off the stack
-        { in base, res[r0]              ; ldw p_rxd_ms, sp[SP_RXD_MS] }
+        { in base, res[r0]                  ; ldw p_rxd_ms, sp[SP_RXD_MS] }
         // Store channel onto stack
         stw r0, sp[SP_CHAN]
 
@@ -150,6 +151,10 @@ start_gigabit_rx:
         // Compute the minimum valid packet size before 4 for the CRC
         ldc r11, 60 + 4
         stw r11, sp[SP_VALID_LEN]
+        
+        // Load max valid packet length to stack
+        ldw r11, cp[max_num_bytes]
+        stw r11, sp[SP_MAX_NUM_BYTES]
 
         // Initially only one of the ping-pong threads must setup the ports and start
         bt r2, rx_sof
@@ -160,7 +165,7 @@ start_gigabit_rx:
         setd res[p_rxd_ms], r11
 
         // Setup the RXDV data
-        { ldc r11, 0                      ; ldw tmp4, sp[SP_RX_DV] }
+        { ldc r11, 0                        ; ldw tmp4, sp[SP_RX_DV] }
         setd res[tmp4], r11
         ldap r11, rxdv_low_isr
         setv res[tmp4], r11
@@ -206,16 +211,16 @@ rx_dont_wait:
 
         // Wait for the SOF                // Read the timestamp
         { in tmp1, res[p_rxd_ms]           ; gettime tmp2 }
-        // Get ls word and discard         // Store off the timestamp
+        // Get ls word and discard (preamble) // Store off the timestamp
         { in tmp1, res[p_rxd_ls]           ; stw tmp2, base[1] }
-        // Enable DV going low interrupt
-        { setsr XS1_SR_IEBLE_SET(0, 1)     ; nop } 
+        // Enable DV going low interrupt   // Load max packet size (bytes) for loop count limit
+        { setsr XS1_SR_IEBLE_SET(0, 1)     ; ldw tmp3, sp[SP_MAX_NUM_BYTES] }
 
 rx_data:
         // Input word from ms port          // Init the pointer to the base address provided
         { in tmp1, res[p_rxd_ms]            ; add ptr, base, ptr }
-        // Input word from ls port          // Number of bits required for two INs after ENDIN
-        { in tmp5, res[p_rxd_ls]            ; ldc tmp4, 17 }
+        // Input word from ls port          // Create a pointer limit address by adding MAX_BYTES to starting ptr
+        { in tmp5, res[p_rxd_ls]            ; add tmp3, tmp3, ptr }
         // ZIP two input words to form 64 bit result in same regs
         zip tmp1, tmp5, 2
         // Init crc as ~tmp5 (first word)   // load resource ID of rx_dv into tmp2 ready for isr
@@ -234,12 +239,13 @@ rx_data_loop:
         // CRC and increment address pointer by 8
         crc32_inc crc, tmp5, poly, ptr, 8
         // CRC only
-        crc32  crc, tmp1, poly
-        // Loop if r11 is 0 (default)
-        bf r11, rx_data_loop
+        crc32 crc, tmp1, poly
+        // Loop if r11 is 0 (default)       // Sets a limit on bytes received to ETHERNET_MAX_PACKET_SIZE
+        { bf r11, rx_data_loop              ; lsu r11, tmp3, ptr}
 
 //.align 16
 rx_done:
+        // TODO: maybe check r11 to see if we ended up here from dv low interrupt or packet too long.
         // Release the last bytes in ms port// Load r11 with the ping pong channel res ID
         { endin tmp3, res[p_rxd_ms]         ; ldw r11, sp[SP_PING_PONG] }
         // Get final data (if there is any) and store words from last iteration of loop.
@@ -248,7 +254,7 @@ rx_done:
         endin tmp3, res[p_rxd_ls]
         { in tmp5, res[p_rxd_ls]            ; stw tmp5, ptr[0] }
         // Need to signal to ping-pong thread quickly   // Load r11 with 32 for shift calculation
-        { out res[r11], r11               ; ldc r11, 32 }
+        { out res[r11], r11                 ; ldc r11, 32 }
 
 // In two word endin we have more than one word of data. so here we process the full word we know is good (second to last word).
 //rx_two_word_endin:
@@ -354,9 +360,12 @@ rx_test_length:
 
         { nop                             ; bt tmp3, rx_length_error }
 
+// We may be able to implement this in the loop byte rx check
 rx_test_max_len:
         // Ignore crc word in byte count  // Load the maximum permissible length
-        { sub tmp2, tmp2, 4               ; ldw tmp3, dp[max_num_bytes] }
+        //{ sub tmp2, tmp2, 4               ; ldw tmp3, cp[max_num_bytes] }
+        { sub tmp2, tmp2, 4               ; ldw tmp3, sp[SP_MAX_NUM_BYTES] }
+        
 
         // Compare actual length with max // If crc is wrong then return pointer
         { lsu tmp3, tmp3, tmp2            ; bt crc, rx_error_crc }
